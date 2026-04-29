@@ -34,6 +34,17 @@ export function AskDrawer({ open, onClose }: AskDrawerProps) {
   const [running, setRunning] = useState(false);
   const [cfgs, setCfgs] = useState<LlmConfig[] | null>(null);
   const [cfgErr, setCfgErr] = useState('');
+  const [telemetry, setTelemetry] = useState<{
+    phase: 'idle' | 'requesting' | 'waiting_first_token' | 'streaming' | 'done' | 'error';
+    startedAt?: number;
+    firstTokenAt?: number;
+    finishedAt?: number;
+    lastUpdateAt?: number;
+    charCount: number;
+    error?: string;
+    lastPrompt?: string;
+  }>({ phase: 'idle', charCount: 0 });
+  const [nowTick, setNowTick] = useState(0);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -42,6 +53,15 @@ export function AskDrawer({ open, onClose }: AskDrawerProps) {
       mountedRef.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    if (telemetry.phase !== 'requesting' && telemetry.phase !== 'waiting_first_token' && telemetry.phase !== 'streaming') {
+      return;
+    }
+    const timer = window.setInterval(() => setNowTick(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [open, telemetry.phase]);
 
   useEffect(() => {
     if (!open) return;
@@ -86,11 +106,26 @@ export function AskDrawer({ open, onClose }: AskDrawerProps) {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, content } : m)));
   };
 
-  const streamLlm = async (prompt: string, onChunk: (text: string) => void) => {
+  const streamLlm = async (
+    prompt: string,
+    onChunk: (text: string) => void,
+    onFirstToken: () => void,
+  ) => {
     if (!activeCfg) {
       throw new Error('未配置可用模型，请先到“集成 → 模型配置”填写 Base URL、Model、API Key');
     }
     const endpoint = `${activeCfg.baseUrl.replace(/\/$/, '')}/chat/completions`;
+    setTelemetry((prev) => ({
+      ...prev,
+      phase: 'requesting',
+      startedAt: Date.now(),
+      firstTokenAt: undefined,
+      finishedAt: undefined,
+      lastUpdateAt: Date.now(),
+      charCount: 0,
+      error: undefined,
+      lastPrompt: prompt,
+    }));
     const resp = await fetch(endpoint, {
       method: 'POST',
       headers: {
@@ -113,12 +148,26 @@ export function AskDrawer({ open, onClose }: AskDrawerProps) {
     });
 
     if (!resp.ok) {
+      setTelemetry((prev) => ({
+        ...prev,
+        phase: 'error',
+        error: `模型请求失败（${resp.status}）`,
+        lastUpdateAt: Date.now(),
+      }));
       throw new Error(`模型请求失败（${resp.status}）`);
     }
     if (!resp.body) {
       const payload = (await resp.json()) as { choices?: Array<{ message?: { content?: string } }> };
       const text = payload.choices?.[0]?.message?.content?.trim() || '';
+      onFirstToken();
       onChunk(text);
+      setTelemetry((prev) => ({
+        ...prev,
+        phase: 'done',
+        finishedAt: Date.now(),
+        charCount: text.length,
+        lastUpdateAt: Date.now(),
+      }));
       return;
     }
 
@@ -126,6 +175,8 @@ export function AskDrawer({ open, onClose }: AskDrawerProps) {
     const decoder = new TextDecoder('utf-8');
     let buffer = '';
     let full = '';
+    let firstTokenSeen = false;
+    setTelemetry((prev) => ({ ...prev, phase: 'waiting_first_token' }));
 
     while (true) {
       const { value, done } = await reader.read();
@@ -144,13 +195,30 @@ export function AskDrawer({ open, onClose }: AskDrawerProps) {
           const token = json.choices?.[0]?.delta?.content ?? '';
           if (token) {
             full += token;
+            if (!firstTokenSeen) {
+              firstTokenSeen = true;
+              onFirstToken();
+              setTelemetry((prev) => ({ ...prev, phase: 'streaming', lastUpdateAt: Date.now() }));
+            }
             onChunk(full);
+            setTelemetry((prev) => ({
+              ...prev,
+              charCount: full.length,
+              lastUpdateAt: Date.now(),
+            }));
           }
         } catch {
           // ignore
         }
       }
     }
+
+    setTelemetry((prev) => ({
+      ...prev,
+      phase: 'done',
+      finishedAt: Date.now(),
+      lastUpdateAt: Date.now(),
+    }));
   };
 
   const handleSubmit = async (val: string) => {
@@ -163,17 +231,52 @@ export function AskDrawer({ open, onClose }: AskDrawerProps) {
 
     const placeholderId = append('agent', '正在思考...');
     try {
-      await streamLlm(prompt, (t) => {
-        if (!mountedRef.current) return;
-        update(placeholderId, t);
-      });
+      await streamLlm(
+        prompt,
+        (t) => {
+          if (!mountedRef.current) return;
+          update(placeholderId, t);
+        },
+        () => {
+          setTelemetry((prev) => ({ ...prev, firstTokenAt: prev.firstTokenAt ?? Date.now(), lastUpdateAt: Date.now() }));
+        },
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : '未知错误';
       update(placeholderId, `执行失败：${msg}`);
+      setTelemetry((prev) => ({ ...prev, phase: 'error', error: msg, lastUpdateAt: Date.now() }));
     } finally {
       if (mountedRef.current) setRunning(false);
     }
   };
+
+  const elapsedMs =
+    telemetry.startedAt
+      ? Math.max(
+          0,
+          (telemetry.phase === 'done' || telemetry.phase === 'error'
+            ? (telemetry.finishedAt || telemetry.lastUpdateAt || telemetry.startedAt)
+            : (nowTick || Date.now())) - telemetry.startedAt,
+        )
+      : 0;
+  const waitFirstTokenMs =
+    telemetry.startedAt && !telemetry.firstTokenAt ? elapsedMs : telemetry.firstTokenAt && telemetry.startedAt
+      ? telemetry.firstTokenAt - telemetry.startedAt
+      : 0;
+  const slow = telemetry.phase === 'waiting_first_token' && waitFirstTokenMs > 8000;
+
+  const statusText =
+    telemetry.phase === 'idle'
+      ? '就绪'
+      : telemetry.phase === 'requesting'
+        ? '正在发起请求…'
+        : telemetry.phase === 'waiting_first_token'
+          ? `等待首 token（${(waitFirstTokenMs / 1000).toFixed(1)}s）`
+          : telemetry.phase === 'streaming'
+            ? `流式输出中（${telemetry.charCount} 字，${(elapsedMs / 1000).toFixed(1)}s）`
+            : telemetry.phase === 'done'
+              ? '就绪'
+              : `失败：${telemetry.error || '未知错误'}`;
 
   return (
     <aside
@@ -198,6 +301,26 @@ export function AskDrawer({ open, onClose }: AskDrawerProps) {
 
         <div className="min-h-0 flex-1 overflow-hidden p-3">
           <div className="flex h-full flex-col rounded-lg border border-white/10 bg-[#111318]">
+              <div className="flex items-center justify-between gap-3 border-b border-white/10 px-3 py-2">
+                <div className="text-[11px] text-[#A1A1AA]">{statusText}</div>
+                <div className="flex items-center gap-2">
+                  {slow && (
+                    <span className="rounded border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-200">
+                      响应较慢
+                    </span>
+                  )}
+                  {telemetry.lastPrompt && telemetry.phase !== 'idle' && telemetry.phase !== 'requesting' && (
+                    <button
+                      type="button"
+                      onClick={() => void handleSubmit(telemetry.lastPrompt || '')}
+                      disabled={running}
+                      className="rounded border border-white/15 bg-white/5 px-2 py-1 text-[10px] font-semibold text-white hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      重试
+                    </button>
+                  )}
+                </div>
+              </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-3">
               <Bubble.List
                 items={bubbleItems}
