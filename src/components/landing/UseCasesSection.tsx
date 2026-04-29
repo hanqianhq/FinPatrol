@@ -16,9 +16,9 @@ export function UseCasesSection() {
       <div className="relative z-10 mx-auto max-w-7xl px-6">
         <div className="mb-20 text-center">
           <h2 className="mb-4 text-5xl font-bold tracking-tighter text-white md:text-7xl">
-            从运维到财务，
+            从运维到财务
             <br />
-            同一套 Agent 底座。
+            同一套 Agent 底座
           </h2>
           <p className="text-xs tracking-widest text-zinc-500">按角色授权 · 按场景装配工作流</p>
         </div>

@@ -32,7 +32,7 @@ export function InfrastructureSection() {
             <h2 className="mb-4 text-5xl font-bold tracking-tighter text-white md:text-7xl">
               面向企业
               <br />
-              <span className="text-zinc-600">治理与 FinOps。</span>
+              <span className="text-zinc-600">治理与 FinOps</span>
             </h2>
             <p className="text-xs tracking-widest text-zinc-500">安全合规 · 可扩展 · 可运营</p>
           </div>

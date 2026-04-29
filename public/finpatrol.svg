@@ -9,9 +9,11 @@
     </filter>
   </defs>
 
+  <!-- scan ring -->
   <circle cx="64" cy="64" r="44" fill="none" stroke="url(#fp_g)" stroke-width="10" opacity="0.95" />
   <circle cx="64" cy="64" r="44" fill="none" stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="2" />
 
+  <!-- shield -->
   <path
     d="M64 34c10.8 6 19.5 7.2 27 8.3v22.1c0 16.3-10.1 26.3-27 33.6c-16.9-7.3-27-17.3-27-33.6V42.3C44.5 41.2 53.2 40 64 34z"
     fill="#0B0D10"
@@ -21,6 +23,7 @@
     filter="url(#fp_s)"
   />
 
+  <!-- check mark -->
   <path
     d="M52.5 66.2l7.6 7.8L78.2 55.8"
     fill="none"

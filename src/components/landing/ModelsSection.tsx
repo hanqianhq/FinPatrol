@@ -22,9 +22,9 @@ export function ModelsSection() {
       <div className="mx-auto max-w-7xl px-6">
         <div className="mb-20">
           <h2 className="mb-4 text-5xl font-bold tracking-tighter text-white md:text-7xl">
-            一条链路，
+            一条链路
             <br />
-            <span className="text-zinc-600">打通巡检与财务。</span>
+            <span className="text-zinc-600">打通巡检与财务</span>
           </h2>
           <p className="text-xs tracking-widest text-zinc-500">可编排 · 可审计 · 可扩展到更多云</p>
         </div>

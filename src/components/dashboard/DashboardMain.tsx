@@ -10,13 +10,13 @@ import {
   Key,
   MoreVertical,
   PanelRight,
-  Send,
   Workflow,
   Wrench,
   X,
   Zap,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { Bubble, Sender } from '@ant-design/x';
 import { Badge } from '@/components/dashboard/Badge';
 import type { DashboardMenuKey } from '@/components/dashboard/Sidebar';
 import { StatCard } from '@/components/dashboard/StatCard';
@@ -27,6 +27,19 @@ import {
 } from '@/data/dashboard';
 import type { AliyunFundTransaction } from '@/data/dashboard';
 import { modelHealthStatusLabel, taskStatusLabel, taskStatusToBadge } from '@/lib/taskStatus';
+import {
+  appendInspectionHistory as dbAppendInspectionHistory,
+  loadAgentMessages,
+  loadCloudTokenConfigs,
+  loadFundFlowRows,
+  loadInspectionHistory,
+  loadLlmConfigs,
+  migrateFromLocalStorageIfNeeded,
+  saveAgentMessages,
+  saveCloudTokenConfigs as dbSaveCloudTokenConfigs,
+  saveFundFlowRows as dbSaveFundFlowRows,
+  saveLlmConfigs as dbSaveLlmConfigs,
+} from '@/db/repository';
 
 type DashboardMainProps = {
   activeMenu: DashboardMenuKey;
@@ -307,80 +320,62 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
   const [extensionInstallMsg, setExtensionInstallMsg] = useState('');
 
   useEffect(() => {
-    try {
-      const cachedRows = localStorage.getItem(FUND_ROWS_CACHE_KEY);
-      if (cachedRows) {
-        const parsedRows = JSON.parse(cachedRows) as FundFlowRow[];
-        if (Array.isArray(parsedRows)) {
-          setFundRows(parsedRows);
-        }
-      }
-    } catch {
-      // Ignore broken cache and continue with empty state.
-    }
+    void (async () => {
+      await migrateFromLocalStorageIfNeeded({
+        fundRowsCacheKey: FUND_ROWS_CACHE_KEY,
+        inspectionHistoryCacheKey: INSPECTION_HISTORY_CACHE_KEY,
+        agentSessionCacheKey: AGENT_SESSION_CACHE_KEY,
+        cloudTokenConfigCacheKey: CLOUD_TOKEN_CONFIG_CACHE_KEY,
+        llmConfigCacheKey: LLM_CONFIG_CACHE_KEY,
+      });
 
-    try {
-      const cachedAuth = localStorage.getItem(ALIYUN_AUTH_CACHE_KEY);
-      if (cachedAuth) {
-        const parsedAuth = JSON.parse(cachedAuth) as { csrfToken?: string; aliyunCookie?: string };
-        if (parsedAuth.csrfToken) {
-          setCsrfToken(parsedAuth.csrfToken);
+      try {
+        const cachedAuth = localStorage.getItem(ALIYUN_AUTH_CACHE_KEY);
+        if (cachedAuth) {
+          const parsedAuth = JSON.parse(cachedAuth) as { csrfToken?: string; aliyunCookie?: string };
+          if (parsedAuth.csrfToken) {
+            setCsrfToken(parsedAuth.csrfToken);
+          }
+          if (parsedAuth.aliyunCookie) {
+            setAliyunCookie(parsedAuth.aliyunCookie);
+          }
         }
-        if (parsedAuth.aliyunCookie) {
-          setAliyunCookie(parsedAuth.aliyunCookie);
-        }
+      } catch {
+        // Ignore broken cache and continue without auto-filled auth.
       }
-    } catch {
-      // Ignore broken cache and continue without auto-filled auth.
-    }
 
-    try {
-      const cachedHistory = localStorage.getItem(INSPECTION_HISTORY_CACHE_KEY);
-      if (cachedHistory) {
-        const parsedHistory = JSON.parse(cachedHistory) as InspectionHistoryRow[];
-        if (Array.isArray(parsedHistory)) {
-          setInspectionHistory(parsedHistory);
+      try {
+        const rows = (await loadFundFlowRows()) as FundFlowRow[];
+        if (Array.isArray(rows) && rows.length) {
+          setFundRows(rows);
         }
+      } catch {
+        // Ignore and keep empty state.
       }
-    } catch {
-      // Ignore broken cache and continue without history.
-    }
 
-    try {
-      const cachedLlmConfigs = localStorage.getItem(LLM_CONFIG_CACHE_KEY);
-      if (cachedLlmConfigs) {
-        const parsedConfigs = JSON.parse(cachedLlmConfigs) as LlmConfig[];
-        if (Array.isArray(parsedConfigs)) {
-          const merged = DEFAULT_LLM_CONFIGS.map((defaultCfg) => {
-            const cached = parsedConfigs.find((cfg) => cfg.provider === defaultCfg.provider);
-            return cached ? { ...defaultCfg, ...cached } : defaultCfg;
-          });
-          setLlmConfigs(merged);
+      try {
+        const history = await loadInspectionHistory();
+        if (Array.isArray(history) && history.length) {
+          setInspectionHistory(history as InspectionHistoryRow[]);
         }
+      } catch {
+        // Ignore broken cache and continue without history.
       }
-    } catch {
-      // Ignore broken cache and continue with default model settings.
-    }
 
-    try {
-      const cachedSession = localStorage.getItem(AGENT_SESSION_CACHE_KEY);
-      if (cachedSession) {
-        const parsedSession = JSON.parse(cachedSession) as AgentMessage[];
-        if (Array.isArray(parsedSession) && parsedSession.length > 0) {
-          setAgentMessages(parsedSession);
+      try {
+        const messages = await loadAgentMessages('default');
+        if (Array.isArray(messages) && messages.length > 0) {
+          setAgentMessages(messages as AgentMessage[]);
         }
+      } catch {
+        // Ignore broken cache and continue with default welcome message.
       }
-    } catch {
-      // Ignore broken cache and continue with default welcome message.
-    }
 
-    try {
-      const cachedCloudTokens = localStorage.getItem(CLOUD_TOKEN_CONFIG_CACHE_KEY);
-      if (cachedCloudTokens) {
-        const parsedConfigs = JSON.parse(cachedCloudTokens) as CloudTokenConfig[];
-        if (Array.isArray(parsedConfigs)) {
+      try {
+        const cachedCloudConfigs = await loadCloudTokenConfigs();
+        if (cachedCloudConfigs && Array.isArray(cachedCloudConfigs)) {
           const merged = DEFAULT_CLOUD_TOKEN_CONFIGS.map((defaultCfg) => {
-            const cached = parsedConfigs.find((cfg) => cfg.provider === defaultCfg.provider);
+            const cached = cachedCloudConfigs.find((cfg) => cfg.provider === defaultCfg.provider);
             return cached
               ? {
                   ...defaultCfg,
@@ -395,23 +390,36 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
             setCsrfToken(aliyunCfg.values.csrfToken || '');
             setAliyunCookie(aliyunCfg.values.cookie || '');
           }
+        } else if (csrfToken || aliyunCookie) {
+          setCloudTokenConfigs((prev) =>
+            prev.map((cfg) =>
+              cfg.provider === 'aliyun'
+                ? { ...cfg, values: { ...cfg.values, csrfToken: csrfToken || '', cookie: aliyunCookie || '' } }
+                : cfg,
+            ),
+          );
         }
-      } else if (csrfToken || aliyunCookie) {
-        setCloudTokenConfigs((prev) =>
-          prev.map((cfg) =>
-            cfg.provider === 'aliyun'
-              ? { ...cfg, values: { ...cfg.values, csrfToken: csrfToken || '', cookie: aliyunCookie || '' } }
-              : cfg,
-          ),
-        );
+      } catch {
+        // Ignore broken cache and keep defaults.
       }
-    } catch {
-      // Ignore broken cache and keep defaults.
-    }
+
+      try {
+        const cached = await loadLlmConfigs();
+        if (cached && Array.isArray(cached)) {
+          const merged = DEFAULT_LLM_CONFIGS.map((defaultCfg) => {
+            const hit = cached.find((cfg) => cfg.provider === defaultCfg.provider);
+            return hit ? { ...defaultCfg, ...hit } : defaultCfg;
+          });
+          setLlmConfigs(merged);
+        }
+      } catch {
+        // Ignore broken cache and continue with default model settings.
+      }
+    })();
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(AGENT_SESSION_CACHE_KEY, JSON.stringify(agentMessages));
+    void saveAgentMessages(agentMessages, 'default');
   }, [agentMessages]);
 
   const appendInspectionHistory = (row: Omit<InspectionHistoryRow, 'id' | 'inspectTime'>) => {
@@ -422,7 +430,12 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
     };
     setInspectionHistory((prev) => {
       const next = [nextRow, ...prev].slice(0, 100);
-      localStorage.setItem(INSPECTION_HISTORY_CACHE_KEY, JSON.stringify(next));
+      void dbAppendInspectionHistory({
+        inspectTime: nextRow.inspectTime,
+        status: nextRow.status,
+        count: nextRow.count,
+        message: nextRow.message,
+      });
       return next;
     });
   };
@@ -458,8 +471,8 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
   };
 
   const handleSaveLlmConfigs = () => {
-    localStorage.setItem(LLM_CONFIG_CACHE_KEY, JSON.stringify(llmConfigs));
-    setLlmSaveMsg('模型配置已保存到浏览器缓存。');
+    void dbSaveLlmConfigs(llmConfigs);
+    setLlmSaveMsg('模型配置已保存到本地数据库（IndexedDB）。');
   };
 
   const getActiveLlmConfig = (): LlmConfig | null => {
@@ -578,7 +591,7 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
   };
 
   const handleSaveCloudTokens = () => {
-    localStorage.setItem(CLOUD_TOKEN_CONFIG_CACHE_KEY, JSON.stringify(cloudTokenConfigs));
+    void dbSaveCloudTokenConfigs(cloudTokenConfigs);
     const aliyunCfg = cloudTokenConfigs.find((cfg) => cfg.provider === 'aliyun');
     if (aliyunCfg) {
       localStorage.setItem(
@@ -735,12 +748,14 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
       if (!rows.length) {
         setFundRows([]);
         localStorage.setItem(FUND_ROWS_CACHE_KEY, JSON.stringify([]));
+        void dbSaveFundFlowRows([]);
         return { message: '巡检完成：未获取到交易流水。', count: 0 };
       }
 
       const normalizedRows = normalizeFundFlowRows(rows);
       setFundRows(normalizedRows);
       localStorage.setItem(FUND_ROWS_CACHE_KEY, JSON.stringify(normalizedRows));
+      void dbSaveFundFlowRows(normalizedRows as unknown[]);
       return { message: `巡检完成：已更新 ${rows.length} 条交易记录。`, count: rows.length };
   };
 
@@ -768,8 +783,8 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
     }
   };
 
-  const handleWorkflowRun = async () => {
-    const prompt = workflowInput.trim();
+  const handleWorkflowRun = async (overridePrompt?: string) => {
+    const prompt = (overridePrompt ?? workflowInput).trim();
     if (!prompt || isAgentRunning) {
       return;
     }
@@ -825,6 +840,16 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
   };
 
   if (activeMenu === 'workflow') {
+    const bubbleItems = agentMessages.map((msg) => ({
+      key: msg.id,
+      role: msg.role === 'user' ? 'user' : 'ai',
+      content: msg.content || (msg.role === 'agent' ? '正在思考...' : ''),
+      header: <div className="text-[10px] text-[#A1A1AA]">{msg.time}</div>,
+      streaming: msg.role === 'agent' && isAgentRunning && !msg.content,
+      loading: msg.role === 'agent' && isAgentRunning && !msg.content,
+      variant: 'borderless' as const,
+    }));
+
     return (
       <div className="flex-1 overflow-hidden p-4 md:p-8">
         <div className="glass-panel relative h-[calc(100vh-7.5rem)] overflow-hidden rounded-xl p-5">
@@ -845,47 +870,34 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
           </div>
 
           <div className="flex h-[calc(100%-2.25rem)] flex-col">
-            <div className="mb-4 flex-1 space-y-3 overflow-y-auto rounded-lg border border-white/5 bg-[#111318] p-3">
-              {agentMessages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={`w-fit max-w-[72%] break-words rounded-lg px-3 py-2 text-xs leading-relaxed ${
-                    msg.role === 'user'
-                      ? 'ml-auto bg-blue-500/15 text-blue-100'
-                      : 'bg-white/5 text-[#D4D4D8]'
-                  }`}
-                >
-                  <div className="mb-1 text-[10px] text-[#A1A1AA]">{msg.time}</div>
-                  <div className="whitespace-pre-line">
-                    {msg.content || (msg.role === 'agent' ? '正在思考...' : '')}
-                  </div>
+            <div className="mb-4 flex-1 overflow-hidden rounded-lg border border-white/5 bg-[#111318] p-3">
+              <div className="flex h-full flex-col">
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  <Bubble.List
+                    items={bubbleItems}
+                    autoScroll
+                    role={{
+                      user: {
+                        placement: 'end',
+                      },
+                      ai: {
+                        placement: 'start',
+                      },
+                    }}
+                  />
                 </div>
-              ))}
+              </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={workflowInput}
-                onChange={(e) => setWorkflowInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    void handleWorkflowRun();
-                  }
-                }}
-                placeholder="给 Agent 下达任务，例如：巡检最近30天充值和转账流水并给出异常摘要"
-                className="flex-1 rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-              />
-              <button
-                type="button"
-                onClick={() => void handleWorkflowRun()}
-                disabled={isAgentRunning}
-                className="flex items-center gap-1 rounded bg-white px-3 py-2 text-xs font-semibold tracking-wide text-black transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                <Send size={13} />
-                {isAgentRunning ? '执行中...' : '发送'}
-              </button>
-            </div>
+            <Sender
+              value={workflowInput}
+              onChange={(val) => setWorkflowInput(val)}
+              loading={isAgentRunning}
+              placeholder="给 Agent 下达任务，例如：巡检最近30天充值和转账流水并给出异常摘要"
+              onSubmit={(val) => {
+                void handleWorkflowRun(val);
+              }}
+            />
           </div>
 
           <aside

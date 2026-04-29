@@ -19,13 +19,13 @@ export function Hero() {
             阿里云巡检 × 多云财务管理 · Agent 工作流编排
           </span>
         </div>
-        <h1 className="text-glow mb-8 flex flex-col items-center text-[10vw] font-black leading-[0.95] tracking-tighter text-white md:text-[5.5rem]">
+        <h1 className="text-glow mb-8 flex flex-col items-center text-[10vw] font-black leading-[1.08] tracking-tighter text-white md:text-[5.5rem] md:leading-[1.05]">
           <span>巡检与财务</span>
           <span className="bg-gradient-to-b from-white via-zinc-300 to-zinc-800 bg-clip-text text-transparent">
             交给智能体闭环
           </span>
         </h1>
-        <p className="mb-12 max-w-2xl text-lg font-light leading-relaxed text-zinc-400 md:text-xl">
+        <p className="mb-12 max-w-2xl text-lg font-light leading-[1.9] text-zinc-400 md:text-xl">
           在统一画布上编排巡检 Playbook、多云账单拉取与对账、成本异常与预算告警。Agent
           按策略自动执行、留痕与升级，让运维与财务在同一条工作流里协同。
         </p>
