@@ -13,7 +13,13 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
-export type DashboardMenuKey = 'overview' | 'aliyun-funds' | 'execution-history' | 'workflow' | 'settings';
+export type DashboardMenuKey =
+  | 'overview'
+  | 'aliyun-funds'
+  | 'execution-history'
+  | 'workflow'
+  | 'model-config'
+  | 'token-config';
 
 type MenuItem = {
   key: DashboardMenuKey | 'other';
@@ -30,9 +36,9 @@ const menuItems: MenuItem[] = [
   { key: 'other', icon: <BarChart2 size={16} />, label: '成本分析' },
   { key: 'other', icon: <CreditCard size={16} />, label: '对账中心' },
   { key: 'aliyun-funds', icon: <Wallet size={16} />, label: '阿里云充值和转账' },
-  { key: 'other', icon: <Key size={16} />, label: '接入凭据' },
   { key: 'other', icon: <FileText size={16} />, label: '文档' },
-  { key: 'settings', icon: <Settings size={16} />, label: '设置' },
+  { key: 'model-config', icon: <Settings size={16} />, label: '模型配置' },
+  { key: 'token-config', icon: <Key size={16} />, label: '接入凭据' },
 ];
 
 type SidebarProps = {
@@ -58,7 +64,7 @@ export function Sidebar({ activeMenu, onMenuChange }: SidebarProps) {
         <div className="mb-2 px-3 text-[10px] font-semibold tracking-wide text-[#A1A1AA]">主导航</div>
         {menuItems.map((item, idx) => (
           <div key={item.label}>
-            {idx === 8 && (
+            {idx === 7 && (
               <div className="mb-2 mt-6 px-3 text-[10px] font-semibold tracking-wide text-[#A1A1AA]">
                 集成
               </div>

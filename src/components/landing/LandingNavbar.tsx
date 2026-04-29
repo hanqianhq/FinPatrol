@@ -24,7 +24,7 @@ export function LandingNavbar() {
       </div>
       <button
         type="button"
-        onClick={() => navigate('/dashboard')}
+        onClick={() => navigate('/overview')}
         className="cursor-pointer bg-white px-5 py-2.5 text-xs font-bold tracking-wide text-black transition-colors hover:bg-zinc-200"
       >
         进入工作台

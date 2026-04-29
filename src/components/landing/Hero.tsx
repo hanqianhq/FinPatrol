@@ -32,7 +32,7 @@ export function Hero() {
         <div className="flex w-full flex-col gap-6 sm:w-auto sm:flex-row">
           <button
             type="button"
-            onClick={() => navigate('/dashboard')}
+            onClick={() => navigate('/overview')}
             className="group flex cursor-pointer items-center justify-center gap-2 bg-white px-10 py-5 text-sm font-bold tracking-wide text-black transition-all hover:bg-zinc-200"
           >
             打开工作台

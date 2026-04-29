@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "云巡凭据采集助手（阿里云 + CFM）",
+  "version": "1.0.0",
+  "description": "从浏览器请求中自动采集阿里云与 CFM 接入凭据，一键复制导入 JSON。",
+  "permissions": ["storage", "webRequest"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "云巡凭据采集助手",
+    "default_popup": "popup.html"
+  }
+}

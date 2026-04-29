@@ -6,7 +6,14 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<LandingPage />} />
-      <Route path="/dashboard" element={<DashboardPage />} />
+      <Route path="/overview" element={<DashboardPage />} />
+      <Route path="/workflow" element={<DashboardPage />} />
+      <Route path="/execution-history" element={<DashboardPage />} />
+      <Route path="/aliyun-funds" element={<DashboardPage />} />
+      <Route path="/model-config" element={<DashboardPage />} />
+      <Route path="/token-config" element={<DashboardPage />} />
+      <Route path="/settings" element={<Navigate to="/model-config" replace />} />
+      <Route path="/dashboard/*" element={<Navigate to="/overview" replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

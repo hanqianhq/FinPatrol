@@ -37,6 +37,9 @@ const ALIYUN_AUTH_CACHE_KEY = 'aliyun-auth-cache-v1';
 const INSPECTION_HISTORY_CACHE_KEY = 'aliyun-inspection-history-cache-v1';
 const LLM_CONFIG_CACHE_KEY = 'llm-provider-configs-v1';
 const AGENT_SESSION_CACHE_KEY = 'agent-chat-session-cache-v1';
+const CLOUD_TOKEN_CONFIG_CACHE_KEY = 'multi-cloud-token-configs-v1';
+const EXTENSION_REPO_ZIP_URL = '/downloads/dual-credential-capture-extension.zip';
+const EXTENSION_INSTALL_URL = 'chrome://extensions/';
 
 type FundFlowRow = AliyunFundTransaction;
 type InspectionHistoryRow = {
@@ -60,6 +63,12 @@ type LlmConfig = {
   model: string;
   apiKey: string;
   enabled: boolean;
+};
+type CloudProvider = 'aliyun' | 'tencent' | 'volcengine' | 'aws' | 'cfm';
+type CloudTokenConfig = {
+  provider: CloudProvider;
+  label: string;
+  values: Record<string, string>;
 };
 
 type AliyunFundFlowItem = {
@@ -221,13 +230,58 @@ const DEFAULT_LLM_CONFIGS: LlmConfig[] = [
   },
 ];
 
+const DEFAULT_CLOUD_TOKEN_CONFIGS: CloudTokenConfig[] = [
+  {
+    provider: 'aliyun',
+    label: '阿里云',
+    values: {
+      csrfToken: '',
+      cookie: '',
+    },
+  },
+  {
+    provider: 'tencent',
+    label: '腾讯云',
+    values: {
+      secretId: '',
+      secretKey: '',
+      token: '',
+    },
+  },
+  {
+    provider: 'volcengine',
+    label: '火山引擎',
+    values: {
+      accessKeyId: '',
+      secretAccessKey: '',
+      sessionToken: '',
+    },
+  },
+  {
+    provider: 'aws',
+    label: 'AWS',
+    values: {
+      accessKeyId: '',
+      secretAccessKey: '',
+      sessionToken: '',
+    },
+  },
+  {
+    provider: 'cfm',
+    label: 'CFM',
+    values: {
+      apiUrl: '',
+      apiToken: '',
+    },
+  },
+];
+
 export function DashboardMain({ activeMenu }: DashboardMainProps) {
   const [fundRows, setFundRows] = useState<FundFlowRow[]>([]);
   const [isInspecting, setIsInspecting] = useState(false);
   const [inspectMsg, setInspectMsg] = useState('');
   const [aliyunCookie, setAliyunCookie] = useState('');
   const [csrfToken, setCsrfToken] = useState('');
-  const [authSaveMsg, setAuthSaveMsg] = useState('');
   const [inspectionHistory, setInspectionHistory] = useState<InspectionHistoryRow[]>([]);
   const [dateRange, setDateRange] = useState(getDefaultDateRange);
   const startDateInputRef = useRef<HTMLInputElement>(null);
@@ -246,6 +300,11 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
   const [toolDrawerOpen, setToolDrawerOpen] = useState(false);
   const [llmConfigs, setLlmConfigs] = useState<LlmConfig[]>(DEFAULT_LLM_CONFIGS);
   const [llmSaveMsg, setLlmSaveMsg] = useState('');
+  const [cloudTokenConfigs, setCloudTokenConfigs] = useState<CloudTokenConfig[]>(DEFAULT_CLOUD_TOKEN_CONFIGS);
+  const [cloudTokenSaveMsg, setCloudTokenSaveMsg] = useState('');
+  const [credentialImportText, setCredentialImportText] = useState('');
+  const [credentialImportMsg, setCredentialImportMsg] = useState('');
+  const [extensionInstallMsg, setExtensionInstallMsg] = useState('');
 
   useEffect(() => {
     try {
@@ -313,6 +372,41 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
       }
     } catch {
       // Ignore broken cache and continue with default welcome message.
+    }
+
+    try {
+      const cachedCloudTokens = localStorage.getItem(CLOUD_TOKEN_CONFIG_CACHE_KEY);
+      if (cachedCloudTokens) {
+        const parsedConfigs = JSON.parse(cachedCloudTokens) as CloudTokenConfig[];
+        if (Array.isArray(parsedConfigs)) {
+          const merged = DEFAULT_CLOUD_TOKEN_CONFIGS.map((defaultCfg) => {
+            const cached = parsedConfigs.find((cfg) => cfg.provider === defaultCfg.provider);
+            return cached
+              ? {
+                  ...defaultCfg,
+                  ...cached,
+                  values: { ...defaultCfg.values, ...cached.values },
+                }
+              : defaultCfg;
+          });
+          setCloudTokenConfigs(merged);
+          const aliyunCfg = merged.find((cfg) => cfg.provider === 'aliyun');
+          if (aliyunCfg) {
+            setCsrfToken(aliyunCfg.values.csrfToken || '');
+            setAliyunCookie(aliyunCfg.values.cookie || '');
+          }
+        }
+      } else if (csrfToken || aliyunCookie) {
+        setCloudTokenConfigs((prev) =>
+          prev.map((cfg) =>
+            cfg.provider === 'aliyun'
+              ? { ...cfg, values: { ...cfg.values, csrfToken: csrfToken || '', cookie: aliyunCookie || '' } }
+              : cfg,
+          ),
+        );
+      }
+    } catch {
+      // Ignore broken cache and keep defaults.
     }
   }, []);
 
@@ -467,15 +561,122 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
     return fullText.trim() || '模型未返回文本内容。';
   };
 
-  const handleSaveAuth = () => {
-    localStorage.setItem(
-      ALIYUN_AUTH_CACHE_KEY,
-      JSON.stringify({
-        csrfToken: csrfToken.trim(),
-        aliyunCookie: aliyunCookie.trim(),
-      }),
+  const updateCloudTokenValue = (provider: CloudProvider, key: string, value: string) => {
+    setCloudTokenConfigs((prev) =>
+      prev.map((cfg) =>
+        cfg.provider === provider ? { ...cfg, values: { ...cfg.values, [key]: value } } : cfg,
+      ),
     );
-    setAuthSaveMsg('已保存到浏览器缓存。');
+    if (provider === 'aliyun') {
+      if (key === 'csrfToken') {
+        setCsrfToken(value);
+      }
+      if (key === 'cookie') {
+        setAliyunCookie(value);
+      }
+    }
+  };
+
+  const handleSaveCloudTokens = () => {
+    localStorage.setItem(CLOUD_TOKEN_CONFIG_CACHE_KEY, JSON.stringify(cloudTokenConfigs));
+    const aliyunCfg = cloudTokenConfigs.find((cfg) => cfg.provider === 'aliyun');
+    if (aliyunCfg) {
+      localStorage.setItem(
+        ALIYUN_AUTH_CACHE_KEY,
+        JSON.stringify({
+          csrfToken: (aliyunCfg.values.csrfToken || '').trim(),
+          aliyunCookie: (aliyunCfg.values.cookie || '').trim(),
+        }),
+      );
+      setCsrfToken(aliyunCfg.values.csrfToken || '');
+      setAliyunCookie(aliyunCfg.values.cookie || '');
+    }
+    setCloudTokenSaveMsg('多云与 CFM 接入凭据已保存到浏览器缓存。');
+  };
+
+  const patchProviderConfig = (provider: CloudProvider, values: Record<string, string>) => {
+    setCloudTokenConfigs((prev) =>
+      prev.map((cfg) =>
+        cfg.provider === provider
+          ? {
+              ...cfg,
+              values: { ...cfg.values, ...values },
+            }
+          : cfg,
+      ),
+    );
+  };
+
+  const handleImportCredentials = () => {
+    const raw = credentialImportText.trim();
+    if (!raw) {
+      setCredentialImportMsg('请先粘贴扩展复制的 JSON 内容。');
+      return;
+    }
+
+    try {
+      const payload = JSON.parse(raw) as Record<string, unknown>;
+      let importedCount = 0;
+
+      if (payload.aliyun && typeof payload.aliyun === 'object') {
+        const aliyun = payload.aliyun as Record<string, unknown>;
+        patchProviderConfig('aliyun', {
+          csrfToken: String(aliyun.csrfToken || aliyun.token || ''),
+          cookie: String(aliyun.cookie || ''),
+        });
+        importedCount += 1;
+      }
+
+      if (payload.cfm && typeof payload.cfm === 'object') {
+        const cfm = payload.cfm as Record<string, unknown>;
+        patchProviderConfig('cfm', {
+          apiUrl: String(cfm.apiUrl || ''),
+          apiToken: String(cfm.authorization || cfm.token || cfm.csrfToken || ''),
+        });
+        importedCount += 1;
+      }
+
+      if (importedCount === 0 && payload.provider) {
+        const provider = String(payload.provider) as CloudProvider;
+        if (provider === 'aliyun') {
+          patchProviderConfig('aliyun', {
+            csrfToken: String(payload.csrfToken || payload.token || ''),
+            cookie: String(payload.cookie || ''),
+          });
+          importedCount += 1;
+        } else if (provider === 'cfm') {
+          patchProviderConfig('cfm', {
+            apiUrl: String(payload.apiUrl || ''),
+            apiToken: String(payload.authorization || payload.token || payload.csrfToken || ''),
+          });
+          importedCount += 1;
+        }
+      }
+
+      if (importedCount === 0) {
+        setCredentialImportMsg('未识别到可导入的阿里云或 CFM 凭据，请检查粘贴内容。');
+        return;
+      }
+
+      setCredentialImportMsg(`导入成功：已回填 ${importedCount} 项凭据，请点击“保存接入凭据”。`);
+      setCredentialImportText('');
+    } catch {
+      setCredentialImportMsg('JSON 解析失败，请确认粘贴的是扩展复制的完整内容。');
+    }
+  };
+
+  const handleOpenExtensionInstall = async () => {
+    const nextWindow = window.open(EXTENSION_INSTALL_URL, '_blank');
+    if (nextWindow) {
+      setExtensionInstallMsg('');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(EXTENSION_INSTALL_URL);
+      setExtensionInstallMsg('浏览器限制了自动打开，已复制安装地址，请粘贴到地址栏打开。');
+    } catch {
+      setExtensionInstallMsg('浏览器限制了自动打开，请在地址栏手动输入 chrome://extensions/');
+    }
   };
 
   const runFundInspection = async (): Promise<{ message: string; count: number }> => {
@@ -648,7 +849,7 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
               {agentMessages.map((msg) => (
                 <div
                   key={msg.id}
-                  className={`max-w-[72%] rounded-lg px-3 py-2 text-xs leading-relaxed ${
+                  className={`w-fit max-w-[72%] break-words rounded-lg px-3 py-2 text-xs leading-relaxed ${
                     msg.role === 'user'
                       ? 'ml-auto bg-blue-500/15 text-blue-100'
                       : 'bg-white/5 text-[#D4D4D8]'
@@ -721,7 +922,7 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
     );
   }
 
-  if (activeMenu === 'settings') {
+  if (activeMenu === 'model-config') {
     return (
       <div className="flex-1 space-y-6 overflow-y-auto p-4 md:p-8">
         <div className="glass-panel rounded-xl p-6">
@@ -787,6 +988,219 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
             保存模型配置
           </button>
           {llmSaveMsg && <p className="mt-2 text-xs text-emerald-300">{llmSaveMsg}</p>}
+        </div>
+      </div>
+    );
+  }
+
+  if (activeMenu === 'token-config') {
+    return (
+      <div className="flex-1 space-y-6 overflow-y-auto p-4 md:p-8">
+        <div className="glass-panel rounded-xl p-6">
+          <h2 className="mb-2 text-lg font-semibold tracking-tight text-white">接入凭据</h2>
+          <p className="text-xs text-[#A1A1AA]">
+            统一管理多云与 CFM 的访问凭据。数据仅保存在当前浏览器本地缓存，不会上传到服务器。
+          </p>
+        </div>
+
+        <div className="glass-panel rounded-xl p-6">
+          <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h3 className="text-base font-semibold tracking-tight text-white">插件下载与安装</h3>
+              <p className="mt-1 text-xs text-[#A1A1AA]">
+                运营同学可先下载插件包，再按安装指引完成「阿里云 + CFM」凭据一键采集。
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <a
+                href={EXTENSION_REPO_ZIP_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 rounded bg-white px-3 py-2 text-xs font-semibold text-black transition-colors hover:bg-zinc-200"
+              >
+                下载插件压缩包（zip）
+                <ArrowUpRight size={14} />
+              </a>
+              <button
+                type="button"
+                onClick={handleOpenExtensionInstall}
+                className="inline-flex items-center gap-1 rounded border border-white/20 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-white/10"
+              >
+                安装地址
+                <ArrowUpRight size={14} />
+              </button>
+            </div>
+          </div>
+          <div className="rounded border border-white/10 bg-[#111318] p-3 text-xs text-[#A1A1AA]">
+            <p>快速安装：下载插件 zip 后先解压，进入 `dual-credential-capture-extension` 文件夹。</p>
+            <p className="mt-1">打开 `chrome://extensions` 开启开发者模式，点击“加载已解压的扩展程序”并选择该文件夹。</p>
+            {extensionInstallMsg && <p className="mt-2 text-amber-300">{extensionInstallMsg}</p>}
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <div className="glass-panel rounded-xl p-5">
+            <h3 className="mb-2 text-sm font-semibold text-white">一键导入（扩展复制内容）</h3>
+            <p className="mb-3 text-xs text-[#A1A1AA]">
+              在扩展里点击“复制 CFM 凭据”或“复制合并 JSON”，粘贴到这里即可自动解析并回填。
+            </p>
+            <textarea
+              value={credentialImportText}
+              onChange={(e) => setCredentialImportText(e.target.value)}
+              rows={6}
+              placeholder="粘贴扩展复制的 JSON..."
+              className="w-full rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+            />
+            <div className="mt-3 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={handleImportCredentials}
+                className="rounded bg-white px-4 py-2 text-xs font-semibold tracking-wide text-black transition-colors hover:bg-zinc-200"
+              >
+                解析并回填
+              </button>
+              {credentialImportMsg && <p className="text-xs text-emerald-300">{credentialImportMsg}</p>}
+            </div>
+          </div>
+
+          {cloudTokenConfigs.map((cfg) => (
+            <div key={cfg.provider} className="glass-panel rounded-xl p-5">
+              <h3 className="mb-3 text-sm font-semibold text-white">{cfg.label}</h3>
+
+              {cfg.provider === 'aliyun' && (
+                <div className="space-y-3">
+                  <div>
+                    <label className="mb-1 block text-xs text-[#A1A1AA]">CSRF Token</label>
+                    <input
+                      type="text"
+                      value={cfg.values.csrfToken || ''}
+                      onChange={(e) => updateCloudTokenValue('aliyun', 'csrfToken', e.target.value)}
+                      placeholder="粘贴 x-csrf-token，例如 0gaOAqmo"
+                      className="w-full rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-[#A1A1AA]">Cookie</label>
+                    <textarea
+                      value={cfg.values.cookie || ''}
+                      onChange={(e) => updateCloudTokenValue('aliyun', 'cookie', e.target.value)}
+                      placeholder="粘贴完整 Cookie（不要包含 -b 前缀）"
+                      rows={5}
+                      className="w-full rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {cfg.provider === 'tencent' && (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <input
+                    type="text"
+                    value={cfg.values.secretId || ''}
+                    onChange={(e) => updateCloudTokenValue('tencent', 'secretId', e.target.value)}
+                    placeholder="SecretId"
+                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                  />
+                  <input
+                    type="password"
+                    value={cfg.values.secretKey || ''}
+                    onChange={(e) => updateCloudTokenValue('tencent', 'secretKey', e.target.value)}
+                    placeholder="SecretKey"
+                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                  />
+                  <input
+                    type="text"
+                    value={cfg.values.token || ''}
+                    onChange={(e) => updateCloudTokenValue('tencent', 'token', e.target.value)}
+                    placeholder="临时 Token（可选）"
+                    className="md:col-span-2 rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                  />
+                </div>
+              )}
+
+              {cfg.provider === 'volcengine' && (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <input
+                    type="text"
+                    value={cfg.values.accessKeyId || ''}
+                    onChange={(e) => updateCloudTokenValue('volcengine', 'accessKeyId', e.target.value)}
+                    placeholder="AccessKey ID"
+                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                  />
+                  <input
+                    type="password"
+                    value={cfg.values.secretAccessKey || ''}
+                    onChange={(e) => updateCloudTokenValue('volcengine', 'secretAccessKey', e.target.value)}
+                    placeholder="Secret AccessKey"
+                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                  />
+                  <input
+                    type="text"
+                    value={cfg.values.sessionToken || ''}
+                    onChange={(e) => updateCloudTokenValue('volcengine', 'sessionToken', e.target.value)}
+                    placeholder="SessionToken（可选）"
+                    className="md:col-span-2 rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                  />
+                </div>
+              )}
+
+              {cfg.provider === 'aws' && (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <input
+                    type="text"
+                    value={cfg.values.accessKeyId || ''}
+                    onChange={(e) => updateCloudTokenValue('aws', 'accessKeyId', e.target.value)}
+                    placeholder="AWS Access Key ID"
+                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                  />
+                  <input
+                    type="password"
+                    value={cfg.values.secretAccessKey || ''}
+                    onChange={(e) => updateCloudTokenValue('aws', 'secretAccessKey', e.target.value)}
+                    placeholder="AWS Secret Access Key"
+                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                  />
+                  <input
+                    type="text"
+                    value={cfg.values.sessionToken || ''}
+                    onChange={(e) => updateCloudTokenValue('aws', 'sessionToken', e.target.value)}
+                    placeholder="AWS Session Token（可选）"
+                    className="md:col-span-2 rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                  />
+                </div>
+              )}
+
+              {cfg.provider === 'cfm' && (
+                <div className="grid grid-cols-1 gap-3">
+                  <input
+                    type="text"
+                    value={cfg.values.apiUrl || ''}
+                    onChange={(e) => updateCloudTokenValue('cfm', 'apiUrl', e.target.value)}
+                    placeholder="CFM API URL（例如 https://apiadmin.cycor.io/api/v1）"
+                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                  />
+                  <input
+                    type="password"
+                    value={cfg.values.apiToken || ''}
+                    onChange={(e) => updateCloudTokenValue('cfm', 'apiToken', e.target.value)}
+                    placeholder="CFM Token"
+                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                  />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div className="glass-panel rounded-xl p-5">
+          <button
+            type="button"
+            onClick={handleSaveCloudTokens}
+            className="rounded bg-white px-4 py-2 text-xs font-semibold tracking-wide text-black transition-colors hover:bg-zinc-200"
+          >
+            保存接入凭据
+          </button>
+          {cloudTokenSaveMsg && <p className="mt-2 text-xs text-emerald-300">{cloudTokenSaveMsg}</p>}
         </div>
       </div>
     );
@@ -898,36 +1312,6 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
                   className="w-full cursor-pointer rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none focus:border-white/20"
                 />
               </div>
-            </div>
-            <div className="pt-2">
-              <label className="mb-1 block text-xs text-[#A1A1AA]">CSRF Token</label>
-              <input
-                type="text"
-                value={csrfToken}
-                onChange={(e) => setCsrfToken(e.target.value)}
-                placeholder="粘贴 x-csrf-token，例如 0gaOAqmo"
-                className="w-full rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-              />
-            </div>
-            <div className="pt-2">
-              <label className="mb-1 block text-xs text-[#A1A1AA]">Cookie</label>
-              <textarea
-                value={aliyunCookie}
-                onChange={(e) => setAliyunCookie(e.target.value)}
-                placeholder="粘贴完整 Cookie（不要包含 -b 前缀）"
-                rows={4}
-                className="w-full rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-              />
-            </div>
-            <div className="pt-2">
-              <button
-                type="button"
-                onClick={handleSaveAuth}
-                className="rounded border border-white/15 bg-white/5 px-3 py-2 text-xs font-semibold tracking-wide text-white transition-colors hover:bg-white/10"
-              >
-                保存配置到浏览器缓存
-              </button>
-              {authSaveMsg && <p className="pt-2 text-xs text-emerald-300">{authSaveMsg}</p>}
             </div>
             {inspectMsg && <p className="text-xs text-blue-300">{inspectMsg}</p>}
           </div>
