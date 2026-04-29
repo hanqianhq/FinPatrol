@@ -1,4 +1,10 @@
-import { db, type CloudTokenConfigRow, type InspectionHistoryRowDb, type LlmConfigRow } from '@/db/appDb';
+import {
+  db,
+  type CloudTokenConfigRow,
+  type ConnectionLogRow,
+  type InspectionHistoryRowDb,
+  type LlmConfigRow,
+} from '@/db/appDb';
 
 const MIGRATION_FLAG_KEY = 'migration.localStorage.v1.completed';
 
@@ -32,6 +38,15 @@ export type LlmConfig = {
   model: string;
   apiKey: string;
   enabled: boolean;
+};
+
+export type ConnectionLog = {
+  id: string;
+  time: string;
+  platform: string;
+  action: string;
+  status: 'success' | 'failed';
+  message: string;
 };
 
 export async function hasCompletedMigration(): Promise<boolean> {
@@ -151,6 +166,31 @@ export async function saveLlmConfigs(configs: LlmConfig[]): Promise<void> {
       ),
     );
   });
+}
+
+export async function loadConnectionLogs(limit = 50): Promise<ConnectionLog[]> {
+  const rows = await db.connectionLogs.orderBy('createdAt').reverse().limit(limit).toArray();
+  return rows.map((r) => ({
+    id: r.id,
+    time: r.time,
+    platform: r.platform,
+    action: r.action,
+    status: r.status,
+    message: r.message,
+  }));
+}
+
+export async function appendConnectionLog(input: Omit<ConnectionLog, 'id'>): Promise<void> {
+  const row: ConnectionLogRow = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    time: input.time,
+    platform: input.platform,
+    action: input.action,
+    status: input.status,
+    message: input.message,
+    createdAt: Date.now(),
+  };
+  await db.connectionLogs.put(row);
 }
 
 type MigrationInputs = {

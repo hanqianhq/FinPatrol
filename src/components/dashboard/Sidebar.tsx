@@ -19,7 +19,14 @@ export type DashboardMenuKey =
   | 'execution-history'
   | 'workflow'
   | 'model-config'
-  | 'token-config';
+  | 'token-config'
+  | 'platform-overview'
+  | 'platform-cfm'
+  | 'platform-aliyun'
+  | 'platform-tencent'
+  | 'platform-aws'
+  | 'platform-credentials'
+  | 'platform-logs';
 
 type MenuItem = {
   key: DashboardMenuKey | 'other';
@@ -63,10 +70,13 @@ const menuGroups: MenuGroup[] = [
   {
     label: '平台连接',
     items: [
-      { key: 'other', icon: <Cloud size={16} />, label: 'CFM' },
-      { key: 'other', icon: <Cloud size={16} />, label: '阿里云' },
-      { key: 'other', icon: <Cloud size={16} />, label: '腾讯云' },
-      { key: 'other', icon: <Cloud size={16} />, label: 'AWS' },
+      { key: 'platform-overview', icon: <Cloud size={16} />, label: '连接总览' },
+      { key: 'platform-cfm', icon: <Cloud size={16} />, label: 'CFM 多云财务' },
+      { key: 'platform-aliyun', icon: <Cloud size={16} />, label: '阿里云' },
+      { key: 'platform-tencent', icon: <Cloud size={16} />, label: '腾讯云' },
+      { key: 'platform-aws', icon: <Cloud size={16} />, label: 'AWS' },
+      { key: 'platform-credentials', icon: <Key size={16} />, label: '凭证管理' },
+      { key: 'platform-logs', icon: <MoreVertical size={16} />, label: '连接日志' },
     ],
   },
   {

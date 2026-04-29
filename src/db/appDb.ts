@@ -54,6 +54,16 @@ export type LlmConfigRow = {
   updatedAt: number;
 };
 
+export type ConnectionLogRow = {
+  id: string;
+  time: string;
+  platform: string;
+  action: string;
+  status: 'success' | 'failed';
+  message: string;
+  createdAt: number;
+};
+
 export class AppDb extends Dexie {
   kv!: Table<KvRow, string>;
   agentSessions!: Table<AgentSessionRow, string>;
@@ -62,6 +72,7 @@ export class AppDb extends Dexie {
   fundFlowCache!: Table<FundFlowCacheRow, string>;
   cloudTokenConfigs!: Table<CloudTokenConfigRow, string>;
   llmConfigs!: Table<LlmConfigRow, string>;
+  connectionLogs!: Table<ConnectionLogRow, string>;
 
   constructor() {
     super('yunxun_agent_workbench_db');
@@ -83,6 +94,17 @@ export class AppDb extends Dexie {
       fundFlowCache: '&id, updatedAt',
       cloudTokenConfigs: '&provider, updatedAt',
       llmConfigs: '&provider, updatedAt',
+    });
+
+    this.version(3).stores({
+      kv: '&key, updatedAt',
+      agentSessions: '&id, updatedAt, createdAt',
+      agentMessages: '&id, sessionId, createdAt',
+      inspectionHistory: '&id, createdAt',
+      fundFlowCache: '&id, updatedAt',
+      cloudTokenConfigs: '&provider, updatedAt',
+      llmConfigs: '&provider, updatedAt',
+      connectionLogs: '&id, createdAt, platform, status',
     });
   }
 }

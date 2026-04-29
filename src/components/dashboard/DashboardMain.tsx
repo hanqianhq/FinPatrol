@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Bubble, Sender } from '@ant-design/x';
+import { useNavigate } from 'react-router-dom';
 import { Badge } from '@/components/dashboard/Badge';
 import type { DashboardMenuKey } from '@/components/dashboard/Sidebar';
 import { StatCard } from '@/components/dashboard/StatCard';
@@ -29,6 +30,8 @@ import type { AliyunFundTransaction } from '@/data/dashboard';
 import { modelHealthStatusLabel, taskStatusLabel, taskStatusToBadge } from '@/lib/taskStatus';
 import {
   appendInspectionHistory as dbAppendInspectionHistory,
+  appendConnectionLog,
+  loadConnectionLogs,
   loadAgentMessages,
   loadCloudTokenConfigs,
   loadFundFlowRows,
@@ -43,6 +46,7 @@ import {
 
 type DashboardMainProps = {
   activeMenu: DashboardMenuKey;
+  onOpenAsk?: () => void;
 };
 
 const FUND_ROWS_CACHE_KEY = 'aliyun-fund-flow-cache-v1';
@@ -82,6 +86,22 @@ type CloudTokenConfig = {
   provider: CloudProvider;
   label: string;
   values: Record<string, string>;
+};
+
+type PlatformStatus = 'live' | 'setup' | 'mock' | 'error';
+
+const platformStatusBadge: Record<PlatformStatus, { label: string; badge: Parameters<typeof Badge>[0]['status'] }> = {
+  live: { label: 'LIVE', badge: 'success' },
+  setup: { label: 'SETUP', badge: 'neutral' },
+  mock: { label: 'MOCK', badge: 'processing' },
+  error: { label: 'ERROR', badge: 'danger' },
+};
+
+const platformStatusText: Record<PlatformStatus, string> = {
+  live: '已连接',
+  setup: '未配置',
+  mock: 'Mock',
+  error: '连接失败',
 };
 
 type AliyunFundFlowItem = {
@@ -289,7 +309,8 @@ const DEFAULT_CLOUD_TOKEN_CONFIGS: CloudTokenConfig[] = [
   },
 ];
 
-export function DashboardMain({ activeMenu }: DashboardMainProps) {
+export function DashboardMain({ activeMenu, onOpenAsk }: DashboardMainProps) {
+  const navigate = useNavigate();
   const [fundRows, setFundRows] = useState<FundFlowRow[]>([]);
   const [isInspecting, setIsInspecting] = useState(false);
   const [inspectMsg, setInspectMsg] = useState('');
@@ -318,6 +339,20 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
   const [credentialImportText, setCredentialImportText] = useState('');
   const [credentialImportMsg, setCredentialImportMsg] = useState('');
   const [extensionInstallMsg, setExtensionInstallMsg] = useState('');
+  const [connTestState, setConnTestState] = useState<
+    Record<string, { running: boolean; result?: 'success' | 'failed'; message?: string }>
+  >({});
+  const [connectionLogs, setConnectionLogs] = useState<
+    Array<{ id: string; time: string; platform: string; action: string; status: 'success' | 'failed'; message: string }>
+  >([]);
+  const [connModal, setConnModal] = useState<{
+    open: boolean;
+    platform: string;
+    phase: 'running' | 'done';
+    result?: 'success' | 'failed';
+    message?: string;
+    progress: number;
+  }>({ open: false, platform: '', phase: 'running', progress: 0 });
 
   useEffect(() => {
     void (async () => {
@@ -414,6 +449,13 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
         }
       } catch {
         // Ignore broken cache and continue with default model settings.
+      }
+
+      try {
+        const logs = await loadConnectionLogs(50);
+        setConnectionLogs(logs);
+      } catch {
+        // ignore
       }
     })();
   }, []);
@@ -690,6 +732,44 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
     } catch {
       setExtensionInstallMsg('浏览器限制了自动打开，请在地址栏手动输入 chrome://extensions/');
     }
+  };
+
+  const runConnectionTest = async (platform: 'CFM' | '阿里云' | '腾讯云' | 'AWS', ok: boolean, reason: string) => {
+    setConnTestState((prev) => ({ ...prev, [platform]: { running: true } }));
+    setConnModal({ open: true, platform, phase: 'running', progress: 0 });
+
+    let progress = 0;
+    const timer = window.setInterval(() => {
+      progress = Math.min(92, progress + Math.max(2, Math.round((92 - progress) * 0.18)));
+      setConnModal((prev) => (prev.open && prev.phase === 'running' ? { ...prev, progress } : prev));
+    }, 90);
+
+    await new Promise((r) => setTimeout(r, 900));
+
+    const status: 'success' | 'failed' = ok ? 'success' : 'failed';
+    const msg = ok ? '连接测试成功' : `连接测试失败：${reason}`;
+    setConnTestState((prev) => ({ ...prev, [platform]: { running: false, result: status, message: msg } }));
+    window.clearInterval(timer);
+    setConnModal({ open: true, platform, phase: 'done', result: status, message: msg, progress: 100 });
+
+    const now = new Date().toLocaleString('zh-CN', { hour12: false });
+    void appendConnectionLog({
+      time: now,
+      platform,
+      action: '测试连接',
+      status,
+      message: msg,
+    });
+    try {
+      const logs = await loadConnectionLogs(50);
+      setConnectionLogs(logs);
+    } catch {
+      // ignore
+    }
+
+    window.setTimeout(() => {
+      setConnModal((prev) => (prev.open ? { ...prev, open: false } : prev));
+    }, 900);
   };
 
   const runFundInspection = async (): Promise<{ message: string; count: number }> => {
@@ -1005,214 +1085,661 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
     );
   }
 
-  if (activeMenu === 'token-config') {
+  const renderCredentialManager = () => (
+    <div className="flex-1 space-y-6 overflow-y-auto p-4 md:p-8">
+      <div className="glass-panel rounded-xl p-6">
+        <h2 className="mb-2 text-lg font-semibold tracking-tight text-white">凭证管理</h2>
+        <p className="text-xs text-[#A1A1AA]">
+          统一管理多云与 CFM 的访问凭据。数据仅保存在当前浏览器本地缓存（IndexedDB），不会上传到服务器。
+        </p>
+      </div>
+
+      <div className="glass-panel rounded-xl p-6">
+        <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h3 className="text-base font-semibold tracking-tight text-white">插件下载与安装</h3>
+            <p className="mt-1 text-xs text-[#A1A1AA]">
+              运营同学可先下载插件包，再按安装指引完成「阿里云 + CFM」凭据一键采集。
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <a
+              href={EXTENSION_REPO_ZIP_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 rounded bg-white px-3 py-2 text-xs font-semibold text-black transition-colors hover:bg-zinc-200"
+            >
+              下载插件压缩包（zip）
+              <ArrowUpRight size={14} />
+            </a>
+            <button
+              type="button"
+              onClick={handleOpenExtensionInstall}
+              className="inline-flex items-center gap-1 rounded border border-white/20 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-white/10"
+            >
+              安装地址
+              <ArrowUpRight size={14} />
+            </button>
+          </div>
+        </div>
+        <div className="rounded border border-white/10 bg-[#111318] p-3 text-xs text-[#A1A1AA]">
+          <p>快速安装：下载插件 zip 后先解压，进入 `dual-credential-capture-extension` 文件夹。</p>
+          <p className="mt-1">打开 `chrome://extensions` 开启开发者模式，点击“加载已解压的扩展程序”并选择该文件夹。</p>
+          {extensionInstallMsg && <p className="mt-2 text-amber-300">{extensionInstallMsg}</p>}
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        <div className="glass-panel rounded-xl p-5">
+          <h3 className="mb-2 text-sm font-semibold text-white">一键导入（扩展复制内容）</h3>
+          <p className="mb-3 text-xs text-[#A1A1AA]">
+            在扩展里点击“复制 CFM 凭据”或“复制合并 JSON”，粘贴到这里即可自动解析并回填。
+          </p>
+          <textarea
+            value={credentialImportText}
+            onChange={(e) => setCredentialImportText(e.target.value)}
+            rows={6}
+            placeholder="粘贴扩展复制的 JSON..."
+            className="w-full rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+          />
+          <div className="mt-3 flex items-center gap-3">
+            <button
+              type="button"
+              onClick={handleImportCredentials}
+              className="rounded bg-white px-4 py-2 text-xs font-semibold tracking-wide text-black transition-colors hover:bg-zinc-200"
+            >
+              解析并回填
+            </button>
+            {credentialImportMsg && <p className="text-xs text-emerald-300">{credentialImportMsg}</p>}
+          </div>
+        </div>
+
+        {cloudTokenConfigs.map((cfg) => (
+          <div key={cfg.provider} className="glass-panel rounded-xl p-5">
+            <h3 className="mb-3 text-sm font-semibold text-white">{cfg.label}</h3>
+
+            {cfg.provider === 'aliyun' && (
+              <div className="space-y-3">
+                <div>
+                  <label className="mb-1 block text-xs text-[#A1A1AA]">CSRF Token</label>
+                  <input
+                    type="text"
+                    value={cfg.values.csrfToken || ''}
+                    onChange={(e) => updateCloudTokenValue('aliyun', 'csrfToken', e.target.value)}
+                    placeholder="粘贴 x-csrf-token，例如 0gaOAqmo"
+                    className="w-full rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-[#A1A1AA]">Cookie</label>
+                  <textarea
+                    value={cfg.values.cookie || ''}
+                    onChange={(e) => updateCloudTokenValue('aliyun', 'cookie', e.target.value)}
+                    placeholder="粘贴完整 Cookie（不要包含 -b 前缀）"
+                    rows={5}
+                    className="w-full rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                  />
+                </div>
+              </div>
+            )}
+
+            {cfg.provider === 'tencent' && (
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <input
+                  type="text"
+                  value={cfg.values.secretId || ''}
+                  onChange={(e) => updateCloudTokenValue('tencent', 'secretId', e.target.value)}
+                  placeholder="SecretId"
+                  className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                />
+                <input
+                  type="password"
+                  value={cfg.values.secretKey || ''}
+                  onChange={(e) => updateCloudTokenValue('tencent', 'secretKey', e.target.value)}
+                  placeholder="SecretKey"
+                  className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                />
+                <input
+                  type="text"
+                  value={cfg.values.token || ''}
+                  onChange={(e) => updateCloudTokenValue('tencent', 'token', e.target.value)}
+                  placeholder="临时 Token（可选）"
+                  className="md:col-span-2 rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                />
+              </div>
+            )}
+
+            {cfg.provider === 'volcengine' && (
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <input
+                  type="text"
+                  value={cfg.values.accessKeyId || ''}
+                  onChange={(e) => updateCloudTokenValue('volcengine', 'accessKeyId', e.target.value)}
+                  placeholder="AccessKey ID"
+                  className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                />
+                <input
+                  type="password"
+                  value={cfg.values.secretAccessKey || ''}
+                  onChange={(e) => updateCloudTokenValue('volcengine', 'secretAccessKey', e.target.value)}
+                  placeholder="Secret AccessKey"
+                  className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                />
+                <input
+                  type="text"
+                  value={cfg.values.sessionToken || ''}
+                  onChange={(e) => updateCloudTokenValue('volcengine', 'sessionToken', e.target.value)}
+                  placeholder="SessionToken（可选）"
+                  className="md:col-span-2 rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                />
+              </div>
+            )}
+
+            {cfg.provider === 'aws' && (
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <input
+                  type="text"
+                  value={cfg.values.accessKeyId || ''}
+                  onChange={(e) => updateCloudTokenValue('aws', 'accessKeyId', e.target.value)}
+                  placeholder="AWS Access Key ID"
+                  className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                />
+                <input
+                  type="password"
+                  value={cfg.values.secretAccessKey || ''}
+                  onChange={(e) => updateCloudTokenValue('aws', 'secretAccessKey', e.target.value)}
+                  placeholder="AWS Secret Access Key"
+                  className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                />
+                <input
+                  type="text"
+                  value={cfg.values.sessionToken || ''}
+                  onChange={(e) => updateCloudTokenValue('aws', 'sessionToken', e.target.value)}
+                  placeholder="AWS Session Token（可选）"
+                  className="md:col-span-2 rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                />
+              </div>
+            )}
+
+            {cfg.provider === 'cfm' && (
+              <div className="grid grid-cols-1 gap-3">
+                <input
+                  type="text"
+                  value={cfg.values.apiUrl || ''}
+                  onChange={(e) => updateCloudTokenValue('cfm', 'apiUrl', e.target.value)}
+                  placeholder="CFM API URL（例如 https://apiadmin.cycor.io/api/v1）"
+                  className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                />
+                <input
+                  type="password"
+                  value={cfg.values.apiToken || ''}
+                  onChange={(e) => updateCloudTokenValue('cfm', 'apiToken', e.target.value)}
+                  placeholder="CFM Token"
+                  className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
+                />
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="glass-panel rounded-xl p-5">
+        <button
+          type="button"
+          onClick={handleSaveCloudTokens}
+          className="rounded bg-white px-4 py-2 text-xs font-semibold tracking-wide text-black transition-colors hover:bg-zinc-200"
+        >
+          保存接入凭据
+        </button>
+        {cloudTokenSaveMsg && <p className="mt-2 text-xs text-emerald-300">{cloudTokenSaveMsg}</p>}
+      </div>
+    </div>
+  );
+
+  if (activeMenu === 'token-config' || activeMenu === 'platform-credentials') {
+    return (
+      renderCredentialManager()
+    );
+  }
+
+  if (activeMenu === 'platform-overview') {
+    const getCfg = (provider: CloudProvider) => cloudTokenConfigs.find((c) => c.provider === provider);
+    const hasCfm = Boolean(getCfg('cfm')?.values.apiUrl?.trim() && getCfg('cfm')?.values.apiToken?.trim());
+    const hasAliyun = Boolean(getCfg('aliyun')?.values.csrfToken?.trim() && getCfg('aliyun')?.values.cookie?.trim());
+    const hasTencent = Boolean(getCfg('tencent')?.values.secretId?.trim() && getCfg('tencent')?.values.secretKey?.trim());
+    const hasAws = Boolean(getCfg('aws')?.values.accessKeyId?.trim() && getCfg('aws')?.values.secretAccessKey?.trim());
+
+    const connectedCount = [hasCfm, hasAliyun, hasTencent, hasAws].filter(Boolean).length;
+
+    const platforms: Array<{
+      key: string;
+      name: string;
+      status: PlatformStatus;
+      systemType: string;
+      accountText: string;
+      toolCount: number;
+      lastCall: string;
+      capabilities: string[];
+      actions: Array<{ label: string; primary?: boolean }>;
+      onTest?: () => void;
+    }> = [
+      {
+        key: 'cfm',
+        name: 'CFM 多云财务',
+        status: hasCfm ? 'live' : 'setup',
+        systemType: '内部多云财务平台',
+        accountText: '38 个云账号',
+        toolCount: 5,
+        lastCall: '3 分钟前',
+        capabilities: ['客户费用查询', '云账号映射', '多云账单汇总', '客户成本分析', '录入前后账单差异核查'],
+        actions: [
+          { label: '测试连接', primary: true },
+          { label: '查看工具' },
+          { label: '配置凭证' },
+        ],
+        onTest: () => runConnectionTest('CFM', hasCfm, hasCfm ? '' : '未配置 API URL 或 Token'),
+      },
+      {
+        key: 'aliyun',
+        name: '阿里云',
+        status: hasAliyun ? 'live' : 'setup',
+        systemType: '云厂商账单平台',
+        accountText: '6 个 RAM 账号',
+        toolCount: 6,
+        lastCall: '8 分钟前',
+        capabilities: ['资金流水查询', '充值记录查询', '转账记录查询', '账单明细查询', '异常消费检测'],
+        actions: [
+          { label: '测试连接', primary: true },
+          { label: '查看工具' },
+          { label: '配置凭证' },
+        ],
+        onTest: () => runConnectionTest('阿里云', hasAliyun, hasAliyun ? '' : '未配置 CSRF Token 或 Cookie'),
+      },
+      {
+        key: 'tencent',
+        name: '腾讯云',
+        status: hasTencent ? 'live' : 'setup',
+        systemType: '云厂商账单平台',
+        accountText: '0',
+        toolCount: 4,
+        lastCall: '暂无',
+        capabilities: ['账单总览', '产品费用明细', '项目费用统计', '异常增长检测'],
+        actions: [{ label: '配置凭证', primary: true }, { label: '启用 Mock' }],
+        onTest: () => runConnectionTest('腾讯云', hasTencent, hasTencent ? '' : '未配置 SecretId 或 SecretKey'),
+      },
+      {
+        key: 'aws',
+        name: 'AWS',
+        status: hasAws ? 'live' : 'mock',
+        systemType: '国际云成本平台',
+        accountText: '3 个 Linked Account',
+        toolCount: 4,
+        lastCall: '12 分钟前',
+        capabilities: ['Cost Explorer 查询', 'Service Cost Breakdown', 'Linked Account Cost', 'Budget Review'],
+        actions: [{ label: '查看 Mock 数据', primary: true }, { label: '配置凭证' }],
+        onTest: () => runConnectionTest('AWS', hasAws, hasAws ? '' : '当前为 Mock 或未配置 AccessKey'),
+      },
+    ];
+
     return (
       <div className="flex-1 space-y-6 overflow-y-auto p-4 md:p-8">
         <div className="glass-panel rounded-xl p-6">
-          <h2 className="mb-2 text-lg font-semibold tracking-tight text-white">接入凭据</h2>
-          <p className="text-xs text-[#A1A1AA]">
-            统一管理多云与 CFM 的访问凭据。数据仅保存在当前浏览器本地缓存，不会上传到服务器。
-          </p>
+          <h2 className="mb-2 text-lg font-semibold tracking-tight text-white">平台连接总览</h2>
+          <p className="text-xs text-[#A1A1AA]">查看 Agent 已接入的平台、可用工具、连接状态与最近调用情况。</p>
         </div>
 
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          <StatCard title="已连接平台" value={`${connectedCount}`} icon={<Cloud size={18} />} subtext={<>LIVE</>} />
+          <StatCard title="云账号数量" value="42" icon={<Cpu size={18} />} subtext={<>跨平台</>} />
+          <StatCard title="最近同步" value="5 分钟前" icon={<Clock size={18} />} subtext={<>连接器</>} />
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {platforms.map((p) => {
+            const statusMeta = platformStatusBadge[p.status];
+            const testState = connTestState[p.name.startsWith('CFM') ? 'CFM' : p.name] || { running: false };
+            return (
+              <div key={p.key} className="glass-panel rounded-xl p-6">
+                <div className="mb-3 flex items-start justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-base font-semibold text-white">{p.name}</h3>
+                      <Badge status={statusMeta.badge}>{statusMeta.label}</Badge>
+                      <span className="text-xs text-[#A1A1AA]">{platformStatusText[p.status]}</span>
+                    </div>
+                    <p className="mt-1 text-xs text-[#A1A1AA]">{p.systemType}</p>
+                  </div>
+                  <div className="flex gap-2">
+                    {p.actions.map((a) => (
+                      <button
+                        key={a.label}
+                        type="button"
+                        onClick={() => {
+                          if (a.label === '测试连接') {
+                            p.onTest?.();
+                            return;
+                          }
+                          if (a.label === '配置凭证') {
+                            navigate('/platform-connections/credentials');
+                          }
+                          if (a.label === '查看工具') {
+                            if (p.key === 'cfm') navigate('/platform-connections/cfm');
+                            if (p.key === 'aliyun') navigate('/platform-connections/aliyun');
+                            if (p.key === 'tencent') navigate('/platform-connections/tencent');
+                            if (p.key === 'aws') navigate('/platform-connections/aws');
+                          }
+                        }}
+                        disabled={a.label === '测试连接' && testState.running}
+                        className={
+                          a.primary
+                            ? `rounded bg-white px-3 py-2 text-xs font-semibold text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60`
+                            : `rounded border border-white/15 bg-white/5 px-3 py-2 text-xs font-semibold text-white hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60`
+                        }
+                      >
+                        {a.label === '测试连接' && testState.running ? '测试中...' : a.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3 text-xs text-[#A1A1AA] md:grid-cols-4">
+                  <div>
+                    <div className="text-[10px] text-[#71717A]">账号数量</div>
+                    <div className="mt-1 text-white/90">{p.accountText}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-[#71717A]">可用工具</div>
+                    <div className="mt-1 font-mono text-white/90">{p.toolCount}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-[#71717A]">最近调用</div>
+                    <div className="mt-1 text-white/90">{p.lastCall}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-[#71717A]">状态</div>
+                    <div className="mt-1 text-white/90">{platformStatusText[p.status]}</div>
+                  </div>
+                </div>
+
+                <div className="mt-4">
+                  <div className="mb-2 text-[10px] font-semibold tracking-wide text-[#A1A1AA]">主要能力</div>
+                  <div className="flex flex-wrap gap-2">
+                    {p.capabilities.map((c) => (
+                      <span
+                        key={c}
+                        className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] text-[#D4D4D8]"
+                      >
+                        {c}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {connModal.open && (
+          <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="pointer-events-auto w-full max-w-sm rounded-xl border border-white/10 bg-[#0f1422] p-4 shadow-[0_24px_80px_rgba(0,0,0,0.55)]">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-white">测试连接</div>
+                  <div className="mt-1 text-xs text-[#A1A1AA]">{connModal.platform}</div>
+                </div>
+                {connModal.phase === 'done' && (
+                  <Badge status={connModal.result === 'success' ? 'success' : 'danger'}>
+                    {connModal.result === 'success' ? 'SUCCESS' : 'ERROR'}
+                  </Badge>
+                )}
+              </div>
+
+              <div className="mt-4">
+                <div className="h-2 overflow-hidden rounded-full bg-white/10">
+                  <div
+                    className={`h-full transition-all duration-300 ${
+                      connModal.phase === 'done'
+                        ? connModal.result === 'success'
+                          ? 'bg-emerald-400'
+                          : 'bg-red-400'
+                        : 'bg-blue-400'
+                    }`}
+                    style={{ width: `${connModal.progress}%` }}
+                  />
+                </div>
+                <div className="mt-2 flex items-center justify-between text-[11px] text-[#A1A1AA]">
+                  <span>{connModal.phase === 'running' ? '正在建立连接…' : connModal.message}</span>
+                  <span className="font-mono">{connModal.progress}%</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (activeMenu === 'platform-cfm') {
+    const cfmCfg = cloudTokenConfigs.find((c) => c.provider === 'cfm');
+    const cfmConfigured = Boolean(cfmCfg?.values.apiUrl?.trim() && cfmCfg?.values.apiToken?.trim());
+    const cfmStatus: PlatformStatus = cfmConfigured ? 'live' : 'setup';
+    const toolRows = [
+      { name: '客户费用查询', desc: '按客户维度查询多云费用趋势和费用结构。', perm: 'read:cost', last: '3 分钟前', status: 'LIVE' },
+      { name: '云账号映射', desc: '维护客户、云厂商、云账号之间的归属关系。', perm: 'write:mapping', last: '1 小时前', status: 'LIVE' },
+      { name: '多云账单汇总', desc: '聚合阿里云、腾讯云、AWS 等平台账单数据。', perm: 'read:bill', last: '8 分钟前', status: 'LIVE' },
+      { name: '账单差异核查', desc: '对比云厂商原始账单与 CFM 录入后的费用差异。', perm: 'read:diff', last: '昨天', status: 'LIVE' },
+      { name: '成本分析报告', desc: '生成客户月报、运营巡检报告和费用波动归因报告。', perm: 'read:report', last: '12 分钟前', status: 'LIVE' },
+    ];
+
+    const capabilities = [
+      { title: '客户费用查询', desc: '按客户维度查询多云费用趋势和费用结构。' },
+      { title: '云账号映射', desc: '维护客户、云厂商、云账号之间的归属关系。' },
+      { title: '多云账单汇总', desc: '聚合阿里云、腾讯云、AWS 等平台账单数据。' },
+      { title: '账单差异核查', desc: '对比云厂商原始账单与 CFM 录入后的费用差异。' },
+      { title: '成本分析报告', desc: '生成客户月报、运营巡检报告和费用波动归因报告。' },
+    ];
+
+    return (
+      <div className="flex-1 space-y-6 overflow-y-auto p-4 md:p-8">
         <div className="glass-panel rounded-xl p-6">
-          <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-            <div>
-              <h3 className="text-base font-semibold tracking-tight text-white">插件下载与安装</h3>
-              <p className="mt-1 text-xs text-[#A1A1AA]">
-                运营同学可先下载插件包，再按安装指引完成「阿里云 + CFM」凭据一键采集。
-              </p>
-            </div>
-            <div className="flex gap-2">
-              <a
-                href={EXTENSION_REPO_ZIP_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 rounded bg-white px-3 py-2 text-xs font-semibold text-black transition-colors hover:bg-zinc-200"
-              >
-                下载插件压缩包（zip）
-                <ArrowUpRight size={14} />
-              </a>
-              <button
-                type="button"
-                onClick={handleOpenExtensionInstall}
-                className="inline-flex items-center gap-1 rounded border border-white/20 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-white/10"
-              >
-                安装地址
-                <ArrowUpRight size={14} />
-              </button>
-            </div>
+          <div className="mb-2 flex items-center gap-2">
+            <h2 className="text-lg font-semibold tracking-tight text-white">CFM 多云财务</h2>
+            <Badge status={platformStatusBadge[cfmStatus].badge}>{platformStatusBadge[cfmStatus].label}</Badge>
           </div>
-          <div className="rounded border border-white/10 bg-[#111318] p-3 text-xs text-[#A1A1AA]">
-            <p>快速安装：下载插件 zip 后先解压，进入 `dual-credential-capture-extension` 文件夹。</p>
-            <p className="mt-1">打开 `chrome://extensions` 开启开发者模式，点击“加载已解压的扩展程序”并选择该文件夹。</p>
-            {extensionInstallMsg && <p className="mt-2 text-amber-300">{extensionInstallMsg}</p>}
+          <p className="text-xs text-[#A1A1AA]">
+            内部多云财务平台，作为客户、账号、云厂商费用映射的主数据源。
+          </p>
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => navigate('/platform-connections/credentials')}
+              className="rounded border border-white/15 bg-white/5 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-white/10"
+            >
+              配置凭证
+            </button>
+            <button
+              type="button"
+              onClick={() => runConnectionTest('CFM', cfmConfigured, cfmConfigured ? '' : '未配置 API URL 或 Token')}
+              disabled={connTestState.CFM?.running}
+              className="rounded bg-white px-3 py-2 text-xs font-semibold text-black transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {connTestState.CFM?.running ? '测试中...' : '测试连接'}
+            </button>
+            <span className="text-xs text-[#A1A1AA]">
+              {cfmConfigured ? `已读取凭证：${cfmCfg?.values.apiUrl || ''}` : '未检测到凭证，请先在“凭证管理”完成配置。'}
+            </span>
           </div>
         </div>
 
-        <div className="space-y-4">
-          <div className="glass-panel rounded-xl p-5">
-            <h3 className="mb-2 text-sm font-semibold text-white">一键导入（扩展复制内容）</h3>
-            <p className="mb-3 text-xs text-[#A1A1AA]">
-              在扩展里点击“复制 CFM 凭据”或“复制合并 JSON”，粘贴到这里即可自动解析并回填。
-            </p>
-            <textarea
-              value={credentialImportText}
-              onChange={(e) => setCredentialImportText(e.target.value)}
-              rows={6}
-              placeholder="粘贴扩展复制的 JSON..."
-              className="w-full rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-            />
-            <div className="mt-3 flex items-center gap-3">
-              <button
-                type="button"
-                onClick={handleImportCredentials}
-                className="rounded bg-white px-4 py-2 text-xs font-semibold tracking-wide text-black transition-colors hover:bg-zinc-200"
-              >
-                解析并回填
-              </button>
-              {credentialImportMsg && <p className="text-xs text-emerald-300">{credentialImportMsg}</p>}
-            </div>
-          </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+          <StatCard
+            title="连接状态"
+            value={cfmConfigured ? '已连接' : '未配置'}
+            icon={<Cloud size={18} />}
+            subtext={<>{platformStatusBadge[cfmStatus].label}</>}
+          />
+          <StatCard title="环境" value="tenant_demo_01" icon={<Cpu size={18} />} subtext={<>租户</>} />
+          <StatCard title="客户数量" value="12" icon={<Activity size={18} />} subtext={<>主数据</>} />
+          <StatCard title="云账号数量" value="38" icon={<Cloud size={18} />} subtext={<>映射</>} />
+          <StatCard title="最近同步" value="2026-04-29 17:42" icon={<Clock size={18} />} subtext={<>2026-01 至 2026-04</>} />
+        </div>
 
-          {cloudTokenConfigs.map((cfg) => (
-            <div key={cfg.provider} className="glass-panel rounded-xl p-5">
-              <h3 className="mb-3 text-sm font-semibold text-white">{cfg.label}</h3>
-
-              {cfg.provider === 'aliyun' && (
-                <div className="space-y-3">
-                  <div>
-                    <label className="mb-1 block text-xs text-[#A1A1AA]">CSRF Token</label>
-                    <input
-                      type="text"
-                      value={cfg.values.csrfToken || ''}
-                      onChange={(e) => updateCloudTokenValue('aliyun', 'csrfToken', e.target.value)}
-                      placeholder="粘贴 x-csrf-token，例如 0gaOAqmo"
-                      className="w-full rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs text-[#A1A1AA]">Cookie</label>
-                    <textarea
-                      value={cfg.values.cookie || ''}
-                      onChange={(e) => updateCloudTokenValue('aliyun', 'cookie', e.target.value)}
-                      placeholder="粘贴完整 Cookie（不要包含 -b 前缀）"
-                      rows={5}
-                      className="w-full rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-                    />
-                  </div>
-                </div>
-              )}
-
-              {cfg.provider === 'tencent' && (
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                  <input
-                    type="text"
-                    value={cfg.values.secretId || ''}
-                    onChange={(e) => updateCloudTokenValue('tencent', 'secretId', e.target.value)}
-                    placeholder="SecretId"
-                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-                  />
-                  <input
-                    type="password"
-                    value={cfg.values.secretKey || ''}
-                    onChange={(e) => updateCloudTokenValue('tencent', 'secretKey', e.target.value)}
-                    placeholder="SecretKey"
-                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-                  />
-                  <input
-                    type="text"
-                    value={cfg.values.token || ''}
-                    onChange={(e) => updateCloudTokenValue('tencent', 'token', e.target.value)}
-                    placeholder="临时 Token（可选）"
-                    className="md:col-span-2 rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-                  />
-                </div>
-              )}
-
-              {cfg.provider === 'volcengine' && (
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                  <input
-                    type="text"
-                    value={cfg.values.accessKeyId || ''}
-                    onChange={(e) => updateCloudTokenValue('volcengine', 'accessKeyId', e.target.value)}
-                    placeholder="AccessKey ID"
-                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-                  />
-                  <input
-                    type="password"
-                    value={cfg.values.secretAccessKey || ''}
-                    onChange={(e) => updateCloudTokenValue('volcengine', 'secretAccessKey', e.target.value)}
-                    placeholder="Secret AccessKey"
-                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-                  />
-                  <input
-                    type="text"
-                    value={cfg.values.sessionToken || ''}
-                    onChange={(e) => updateCloudTokenValue('volcengine', 'sessionToken', e.target.value)}
-                    placeholder="SessionToken（可选）"
-                    className="md:col-span-2 rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-                  />
-                </div>
-              )}
-
-              {cfg.provider === 'aws' && (
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                  <input
-                    type="text"
-                    value={cfg.values.accessKeyId || ''}
-                    onChange={(e) => updateCloudTokenValue('aws', 'accessKeyId', e.target.value)}
-                    placeholder="AWS Access Key ID"
-                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-                  />
-                  <input
-                    type="password"
-                    value={cfg.values.secretAccessKey || ''}
-                    onChange={(e) => updateCloudTokenValue('aws', 'secretAccessKey', e.target.value)}
-                    placeholder="AWS Secret Access Key"
-                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-                  />
-                  <input
-                    type="text"
-                    value={cfg.values.sessionToken || ''}
-                    onChange={(e) => updateCloudTokenValue('aws', 'sessionToken', e.target.value)}
-                    placeholder="AWS Session Token（可选）"
-                    className="md:col-span-2 rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-                  />
-                </div>
-              )}
-
-              {cfg.provider === 'cfm' && (
-                <div className="grid grid-cols-1 gap-3">
-                  <input
-                    type="text"
-                    value={cfg.values.apiUrl || ''}
-                    onChange={(e) => updateCloudTokenValue('cfm', 'apiUrl', e.target.value)}
-                    placeholder="CFM API URL（例如 https://apiadmin.cycor.io/api/v1）"
-                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-                  />
-                  <input
-                    type="password"
-                    value={cfg.values.apiToken || ''}
-                    onChange={(e) => updateCloudTokenValue('cfm', 'apiToken', e.target.value)}
-                    placeholder="CFM Token"
-                    className="rounded border border-white/10 bg-[#111318] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-500 focus:border-white/20"
-                  />
-                </div>
-              )}
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {capabilities.map((c) => (
+            <div key={c.title} className="glass-panel rounded-xl p-5">
+              <h3 className="text-sm font-semibold text-white">{c.title}</h3>
+              <p className="mt-2 text-xs leading-relaxed text-[#A1A1AA]">{c.desc}</p>
             </div>
           ))}
         </div>
 
-        <div className="glass-panel rounded-xl p-5">
-          <button
-            type="button"
-            onClick={handleSaveCloudTokens}
-            className="rounded bg-white px-4 py-2 text-xs font-semibold tracking-wide text-black transition-colors hover:bg-zinc-200"
-          >
-            保存接入凭据
-          </button>
-          {cloudTokenSaveMsg && <p className="mt-2 text-xs text-emerald-300">{cloudTokenSaveMsg}</p>}
+        <div className="glass-panel overflow-hidden rounded-xl">
+          <div className="border-b border-white/5 bg-[#171A20] px-5 py-4">
+            <h3 className="text-sm font-semibold tracking-tight">可用工具</h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] border-collapse text-left">
+              <thead>
+                <tr className="bg-white/[0.02]">
+                  <th className="whitespace-nowrap px-5 py-3 text-[10px] font-semibold tracking-wide text-[#A1A1AA]">
+                    工具名称
+                  </th>
+                  <th className="px-5 py-3 text-[10px] font-semibold tracking-wide text-[#A1A1AA]">说明</th>
+                  <th className="whitespace-nowrap px-5 py-3 text-[10px] font-semibold tracking-wide text-[#A1A1AA]">
+                    权限
+                  </th>
+                  <th className="whitespace-nowrap px-5 py-3 text-[10px] font-semibold tracking-wide text-[#A1A1AA]">
+                    最近调用
+                  </th>
+                  <th className="whitespace-nowrap px-5 py-3 text-[10px] font-semibold tracking-wide text-[#A1A1AA]">
+                    状态
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {toolRows.map((r) => (
+                  <tr key={r.name} className="transition-colors hover:bg-white/[0.02]">
+                    <td className="whitespace-nowrap px-5 py-3 text-xs text-white/90">{r.name}</td>
+                    <td className="px-5 py-3 text-xs text-[#A1A1AA]">{r.desc}</td>
+                    <td className="whitespace-nowrap px-5 py-3 font-mono text-xs text-[#A1A1AA]">{r.perm}</td>
+                    <td className="whitespace-nowrap px-5 py-3 text-xs text-[#A1A1AA]">{r.last}</td>
+                    <td className="whitespace-nowrap px-5 py-3">
+                      <Badge status="success">{r.status}</Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (activeMenu === 'platform-aliyun') {
+    return (
+      <div className="flex-1 space-y-6 overflow-y-auto p-4 md:p-8">
+        <div className="glass-panel rounded-xl p-6">
+          <div className="mb-2 flex items-center gap-2">
+            <h2 className="text-lg font-semibold tracking-tight text-white">阿里云</h2>
+            <Badge status={platformStatusBadge.live.badge}>{platformStatusBadge.live.label}</Badge>
+          </div>
+          <p className="text-xs text-[#A1A1AA]">云厂商账单平台，支持账单与资金类巡检工具。</p>
+        </div>
+        <div className="glass-panel rounded-xl p-6">
+          <p className="text-xs text-[#A1A1AA]">
+            已接入能力（Mock）：资金流水查询、充值/转账记录、账单明细、异常消费检测。后续会在此页补充工具表与连接测试。
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (activeMenu === 'platform-tencent') {
+    return (
+      <div className="flex-1 space-y-6 overflow-y-auto p-4 md:p-8">
+        <div className="glass-panel rounded-xl p-6">
+          <div className="mb-2 flex items-center gap-2">
+            <h2 className="text-lg font-semibold tracking-tight text-white">腾讯云</h2>
+            <Badge status={platformStatusBadge.setup.badge}>{platformStatusBadge.setup.label}</Badge>
+          </div>
+          <p className="text-xs text-[#A1A1AA]">云厂商账单平台，待配置凭证后开启账单与异常增长检测能力。</p>
+        </div>
+        <div className="glass-panel rounded-xl p-6">
+          <p className="text-xs text-[#A1A1AA]">
+            请到“凭证管理”配置 SecretId/SecretKey。配置完成后将展示：账单总览、产品费用明细、项目费用统计、异常增长检测等工具。
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (activeMenu === 'platform-aws') {
+    return (
+      <div className="flex-1 space-y-6 overflow-y-auto p-4 md:p-8">
+        <div className="glass-panel rounded-xl p-6">
+          <div className="mb-2 flex items-center gap-2">
+            <h2 className="text-lg font-semibold tracking-tight text-white">AWS</h2>
+            <Badge status={platformStatusBadge.mock.badge}>{platformStatusBadge.mock.label}</Badge>
+          </div>
+          <p className="text-xs text-[#A1A1AA]">国际云成本平台，当前为 Mock 接入，后续可切换为真实 Cost Explorer。</p>
+        </div>
+        <div className="glass-panel rounded-xl p-6">
+          <p className="text-xs text-[#A1A1AA]">
+            Mock 能力：Cost Explorer 查询、Service Cost Breakdown、Linked Account Cost、Budget Review。后续会补充 mock 数据浏览与真实连接测试。
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (activeMenu === 'platform-logs') {
+    const rows = connectionLogs;
+
+    return (
+      <div className="flex-1 space-y-6 overflow-y-auto p-4 md:p-8">
+        <div className="glass-panel rounded-xl p-6">
+          <h2 className="mb-2 text-lg font-semibold tracking-tight text-white">连接日志</h2>
+          <p className="text-xs text-[#A1A1AA]">记录平台连接器与工具调用的最近执行情况（当前为 Mock）。</p>
+        </div>
+        <div className="glass-panel overflow-hidden rounded-xl">
+          <div className="border-b border-white/5 bg-[#171A20] px-5 py-4">
+            <h3 className="text-sm font-semibold tracking-tight">最近调用</h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] border-collapse text-left">
+              <thead>
+                <tr className="bg-white/[0.02]">
+                  <th className="whitespace-nowrap px-5 py-3 text-[10px] font-semibold tracking-wide text-[#A1A1AA]">时间</th>
+                  <th className="whitespace-nowrap px-5 py-3 text-[10px] font-semibold tracking-wide text-[#A1A1AA]">平台</th>
+                  <th className="whitespace-nowrap px-5 py-3 text-[10px] font-semibold tracking-wide text-[#A1A1AA]">动作</th>
+                  <th className="whitespace-nowrap px-5 py-3 text-[10px] font-semibold tracking-wide text-[#A1A1AA]">状态</th>
+                  <th className="px-5 py-3 text-[10px] font-semibold tracking-wide text-[#A1A1AA]">说明</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {rows.map((r) => (
+                  <tr key={r.id} className="transition-colors hover:bg-white/[0.02]">
+                    <td className="whitespace-nowrap px-5 py-3 font-mono text-xs text-[#A1A1AA]">{r.time}</td>
+                    <td className="whitespace-nowrap px-5 py-3 text-xs text-white/90">{r.platform}</td>
+                    <td className="whitespace-nowrap px-5 py-3 text-xs text-[#A1A1AA]">{r.action}</td>
+                    <td className="whitespace-nowrap px-5 py-3">
+                      <Badge status={r.status === 'success' ? 'success' : 'danger'}>
+                        {r.status === 'success' ? 'SUCCESS' : 'ERROR'}
+                      </Badge>
+                    </td>
+                    <td className="px-5 py-3 text-xs text-[#A1A1AA]">{r.message}</td>
+                  </tr>
+                ))}
+                {rows.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-5 py-10 text-center text-xs text-[#A1A1AA]">
+                      暂无日志。你可以在“连接总览/平台详情”点击“测试连接”生成记录。
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     );
@@ -1397,8 +1924,12 @@ export function DashboardMain({ activeMenu }: DashboardMainProps) {
             执行、查看运行轨迹，并将结果回写工单或通知渠道。
           </span>
         </div>
-        <button type="button" className="text-xs font-medium text-blue-400 hover:text-blue-300">
-          编排指南
+        <button
+          type="button"
+          onClick={() => onOpenAsk?.()}
+          className="text-xs font-medium text-blue-400 hover:text-blue-300"
+        >
+          随便问问
         </button>
       </div>
 
